@@ -1,5 +1,5 @@
 """
-Innoplus Ticket Analytics — Streamlit App
+Cyncly Support Ticket Analytics — Streamlit App
 ==========================================
 Upload the ticket export (xlsx/csv) in the left panel, filter by Product,
 Channel, Country, Language and Customer Category, and review:
@@ -255,7 +255,7 @@ def style_pct_cols(df: pd.DataFrame, pct_cols) -> "pd.io.formats.style.Styler":
 st.sidebar.title("📂 Data Source")
 uploaded_file = st.sidebar.file_uploader("Upload ticket export (.xlsx or .csv)", type=["xlsx", "xls", "csv"])
 
-st.title("🎫 Innoplus Support Ticket Analytics")
+st.title("Cyncly Support Ticket Analytics")
 
 if uploaded_file is None:
     st.info("Upload a data file from the left panel to get started.")
