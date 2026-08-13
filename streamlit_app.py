@@ -1,11 +1,14 @@
 """
-Cyncly Support Ticket Analytics — Streamlit App
+Innoplus Ticket Analytics — Streamlit App
 ==========================================
 Upload the ticket export (xlsx/csv) in the left panel, filter by Product,
 Channel, Country, Language and Customer Category, and review:
   1. Hourly inflow trend (line chart, one line per Product, + auto-generated observations)
   2. Overall SLA / quality summary table (Product x Channel x Category x Country x Language)
   3. Email-channel specific SLA summary table (Product x Category x Country x Language)
+  4. KPI observations (quantified, numbers-first bullets)
+  5. Recommendations (the 11 standard levers + industry best practices, contextualized
+     to the current filters with a quantified KPI impact for each)
 
 Run with:  streamlit run streamlit_app.py
 """
@@ -15,7 +18,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-st.set_page_config(page_title="Innoplus Ticket Analytics", layout="wide")
+st.set_page_config(page_title="Cyncly Support Analytics", layout="wide")
 
 # --------------------------------------------------------------------------
 # Column name map (source column -> internal / display label)
@@ -35,6 +38,7 @@ RAW_COLS = {
     "rwt": "New RWT (1-Comp)",
     "csat": "satisfaction_rating.score",
     "reopens": "metric_set.reopens",
+    "priority": "priority",
 }
 
 LABELS = {
@@ -47,6 +51,20 @@ LABELS = {
 
 TREND_UP, TREND_DOWN, TREND_FLAT = "\u2191", "\u2193", "\u2192"
 TREND_THRESHOLD = 1.0  # percentage points; smaller moves are shown as flat
+
+# KPI targets used by the observations & recommendations engine.
+# CSAT (>=90%) and Reopen (<10%) targets are as specified by the business.
+# FRT / 24Hr RT / RWT / Email FRT use a 90% SLA target, the common industry
+# convention for first-reply and resolution-time compliance, applied here
+# for consistency since no separate target was provided for those metrics.
+KPI_TARGETS = {
+    "FRT": {"label": "First Reply Time SLA %", "target": 90.0, "higher_is_better": True},
+    "24HrRT": {"label": "24-Hr Resolution Time SLA %", "target": 90.0, "higher_is_better": True},
+    "CSAT": {"label": "CSAT %", "target": 90.0, "higher_is_better": True},
+    "Reopen": {"label": "Reopen %", "target": 10.0, "higher_is_better": False},
+    "EmailFRT": {"label": "Email First Reply Time SLA %", "target": 90.0, "higher_is_better": True},
+    "RWT": {"label": "Requester Wait Time (24Hr) SLA % [Email]", "target": 90.0, "higher_is_better": True},
+}
 
 
 # --------------------------------------------------------------------------
@@ -250,12 +268,387 @@ def style_pct_cols(df: pd.DataFrame, pct_cols) -> "pd.io.formats.style.Styler":
 
 
 # --------------------------------------------------------------------------
+# KPI computation helpers (shared by the Observations & Recommendations engine)
+# --------------------------------------------------------------------------
+def compute_kpis(sub_df: pd.DataFrame) -> dict:
+    """Core KPI set applicable to all channels: FRT, 24Hr RT, CSAT, Reopen %."""
+    return {
+        "Ticket Count": len(sub_df),
+        "FRT": pct_compliant(sub_df[RAW_COLS["frt"]]) if RAW_COLS["frt"] in sub_df.columns else np.nan,
+        "24HrRT": pct_compliant(sub_df[RAW_COLS["rt24"]]) if RAW_COLS["rt24"] in sub_df.columns else np.nan,
+        "CSAT": pct_csat(sub_df[RAW_COLS["csat"]]) if RAW_COLS["csat"] in sub_df.columns else np.nan,
+        "Reopen": pct_reopen(sub_df[RAW_COLS["reopens"]]) if RAW_COLS["reopens"] in sub_df.columns else np.nan,
+    }
+
+
+def compute_email_kpis(df: pd.DataFrame) -> dict:
+    """Email-only KPI set: adds Email FRT and Requester Wait Time (RWT)."""
+    if LABELS["channel"] not in df.columns:
+        email_df = df.iloc[0:0]
+    else:
+        email_df = df[df[LABELS["channel"]].astype(str).str.lower() == "email"]
+    return {
+        "Ticket Count": len(email_df),
+        "EmailFRT": pct_compliant(email_df[RAW_COLS["email_frt"]]) if RAW_COLS["email_frt"] in email_df.columns else np.nan,
+        "RWT": pct_compliant(email_df[RAW_COLS["rwt"]]) if RAW_COLS["rwt"] in email_df.columns else np.nan,
+    }
+
+
+def breakdown_by(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
+    """Per-value KPI breakdown for a single grouping column (e.g. Channel)."""
+    if group_col not in df.columns:
+        return pd.DataFrame()
+    rows = []
+    work = df.copy()
+    work[group_col] = work[group_col].fillna("Unknown")
+    for val, g in work.groupby(group_col, dropna=False):
+        k = compute_kpis(g)
+        k[group_col] = val
+        rows.append(k)
+    return pd.DataFrame(rows)
+
+
+def english_vs_non_english(df: pd.DataFrame):
+    if LABELS["language"] not in df.columns:
+        return pd.DataFrame()
+    work = df.copy()
+    work["_lang_group"] = np.where(work[LABELS["language"]].astype(str) == "English", "English", "Non-English")
+    rows = []
+    for val, g in work.groupby("_lang_group"):
+        k = compute_kpis(g)
+        k["Group"] = val
+        rows.append(k)
+    return pd.DataFrame(rows)
+
+
+def product_ticket_share(df: pd.DataFrame) -> pd.DataFrame:
+    if LABELS["product"] not in df.columns:
+        return pd.DataFrame()
+    counts = df[LABELS["product"]].fillna("Unknown").value_counts()
+    if counts.empty:
+        return pd.DataFrame()
+    share = (counts / counts.sum() * 100).round(1)
+    return pd.DataFrame({"Product": counts.index, "Ticket Count": counts.values, "Share %": share.values})
+
+
+def high_priority_kpis(df: pd.DataFrame):
+    if RAW_COLS["priority"] not in df.columns:
+        return None
+    high_df = df[df[RAW_COLS["priority"]].astype(str).str.lower().isin(["high", "urgent"])]
+    if high_df.empty:
+        return None
+    k = compute_kpis(high_df)
+    return k
+
+
+def fmt_pct(v) -> str:
+    return f"{v:.1f}%" if pd.notna(v) else "N/A"
+
+
+def gap_to_target(value: float, kpi_key: str) -> float:
+    """Signed distance still needed to reach target; positive means falling short."""
+    target = KPI_TARGETS[kpi_key]["target"]
+    higher_is_better = KPI_TARGETS[kpi_key]["higher_is_better"]
+    if pd.isna(value):
+        return np.nan
+    return (target - value) if higher_is_better else (value - target)
+
+
+# --------------------------------------------------------------------------
+# Observations engine — every bullet includes at least one number
+# --------------------------------------------------------------------------
+def generate_kpi_observations(df: pd.DataFrame, overall_table: pd.DataFrame, email_table: pd.DataFrame) -> list:
+    obs = []
+    overall = compute_kpis(df)
+    n = overall["Ticket Count"]
+
+    if pd.notna(overall["FRT"]):
+        obs.append(
+            f"**First Reply Time (FRT) SLA** is at **{overall['FRT']:.1f}%** across {n:,} tickets "
+            f"({gap_to_target(overall['FRT'],'FRT'):+.1f} points vs. the 90% target)."
+        )
+    if pd.notna(overall["24HrRT"]):
+        obs.append(
+            f"**24-Hr Resolution Time SLA** is at **{overall['24HrRT']:.1f}%** "
+            f"({gap_to_target(overall['24HrRT'],'24HrRT'):+.1f} points vs. the 90% target)."
+        )
+    if pd.notna(overall["CSAT"]):
+        obs.append(
+            f"**CSAT** is at **{overall['CSAT']:.1f}%** against the 90% target "
+            f"({gap_to_target(overall['CSAT'],'CSAT'):+.1f} points)."
+        )
+    if pd.notna(overall["Reopen"]):
+        obs.append(
+            f"**Reopen rate** is at **{overall['Reopen']:.1f}%** against the <10% target "
+            f"({gap_to_target(overall['Reopen'],'Reopen'):+.1f} points over target)."
+        )
+
+    # Channel spread
+    ch_kpis = breakdown_by(df, LABELS["channel"]) if LABELS["channel"] in df.columns else pd.DataFrame()
+    if not ch_kpis.empty and len(ch_kpis) > 1 and ch_kpis["FRT"].notna().sum() > 1:
+        best = ch_kpis.loc[ch_kpis["FRT"].idxmax()]
+        worst = ch_kpis.loc[ch_kpis["FRT"].idxmin()]
+        obs.append(
+            f"FRT SLA varies by channel: **{best[LABELS['channel']]}** leads at **{best['FRT']:.1f}%** "
+            f"vs. **{worst[LABELS['channel']]}** at **{worst['FRT']:.1f}%**, a gap of "
+            f"**{best['FRT']-worst['FRT']:.1f} points**."
+        )
+
+    # Non-English gap
+    lang_kpis = english_vs_non_english(df)
+    if not lang_kpis.empty and set(lang_kpis["Group"]) == {"English", "Non-English"}:
+        eng = lang_kpis[lang_kpis["Group"] == "English"].iloc[0]
+        non_eng = lang_kpis[lang_kpis["Group"] == "Non-English"].iloc[0]
+        if pd.notna(eng["CSAT"]) and pd.notna(non_eng["CSAT"]):
+            obs.append(
+                f"Non-English tickets ({non_eng['Ticket Count']:,} tickets) show CSAT of "
+                f"**{non_eng['CSAT']:.1f}%** vs. **{eng['CSAT']:.1f}%** for English tickets "
+                f"({eng['Ticket Count']:,} tickets), a **{eng['CSAT']-non_eng['CSAT']:+.1f} point** gap."
+            )
+
+    # Trend direction count from the overall table
+    if not overall_table.empty and "FRT Trend" in overall_table.columns:
+        down_count = (overall_table["FRT Trend"] == TREND_DOWN).sum()
+        up_count = (overall_table["FRT Trend"] == TREND_UP).sum()
+        total_rows = len(overall_table)
+        obs.append(
+            f"Among the top {total_rows} Channel/Product/Category/Country/Language combinations, "
+            f"**{down_count}** show a declining FRT trend and **{up_count}** show an improving FRT trend "
+            f"over the selected period."
+        )
+
+    # Email-specific
+    if not email_table.empty:
+        em = compute_email_kpis(df)
+        if pd.notna(em["EmailFRT"]):
+            obs.append(
+                f"Email channel First Reply Time SLA is **{em['EmailFRT']:.1f}%** across "
+                f"**{em['Ticket Count']:,}** email tickets."
+            )
+        if pd.notna(em["RWT"]):
+            obs.append(
+                f"Email channel Requester Wait Time SLA is **{em['RWT']:.1f}%** "
+                f"({gap_to_target(em['RWT'],'RWT'):+.1f} points vs. the 90% target)."
+            )
+
+    return obs
+
+
+# --------------------------------------------------------------------------
+# Recommendations engine — links each generic recommendation to the current
+# filtered data, and quantifies at least one KPI that would improve.
+# --------------------------------------------------------------------------
+def generate_recommendations(df: pd.DataFrame, overall_table: pd.DataFrame, email_table: pd.DataFrame) -> list:
+    recs = []
+    overall = compute_kpis(df)
+    ch_kpis = breakdown_by(df, LABELS["channel"]) if LABELS["channel"] in df.columns else pd.DataFrame()
+    lang_kpis = english_vs_non_english(df)
+    prod_share = product_ticket_share(df)
+    email_kpis = compute_email_kpis(df)
+    hp_kpis = high_priority_kpis(df)
+
+    # 1. Smart channel routing
+    if not ch_kpis.empty and len(ch_kpis) > 1:
+        scored = ch_kpis.copy()
+        scored["_score"] = scored[["FRT", "24HrRT", "CSAT"]].mean(axis=1, skipna=True)
+        scored = scored.dropna(subset=["_score"])
+        if len(scored) > 1:
+            best = scored.loc[scored["_score"].idxmax()]
+            worst = scored.loc[scored["_score"].idxmin()]
+            gap = best["_score"] - worst["_score"]
+            if gap >= 2:
+                recs.append(
+                    (
+                        "1. Smart channel routing",
+                        f"**{best[LABELS['channel']]}** tickets average **{best['_score']:.1f}%** across FRT/24Hr RT/CSAT, "
+                        f"vs. **{worst['_score']:.1f}%** for **{worst[LABELS['channel']]}** — a **{gap:.1f} point** gap. "
+                        f"Routing more eligible {worst[LABELS['channel']]} volume through {best[LABELS['channel']]}-style "
+                        f"handling (or the channel itself, where feasible) could lift {worst[LABELS['channel']]}'s FRT SLA "
+                        f"from **{worst['FRT']:.1f}%** toward **{best['FRT']:.1f}%**.",
+                    )
+                )
+            else:
+                recs.append(
+                    (
+                        "1. Smart channel routing",
+                        f"Channel performance is fairly even currently (composite scores within **{gap:.1f} points** "
+                        f"of each other across {len(scored)} channels), so routing gains would be marginal today — "
+                        f"worth re-checking as volumes shift.",
+                    )
+                )
+
+    # 2. Non-English AI real-time translation
+    if not lang_kpis.empty and set(lang_kpis["Group"]) >= {"English", "Non-English"}:
+        eng = lang_kpis[lang_kpis["Group"] == "English"].iloc[0]
+        non_eng = lang_kpis[lang_kpis["Group"] == "Non-English"].iloc[0]
+        if pd.notna(eng["FRT"]) and pd.notna(non_eng["FRT"]) and non_eng["Ticket Count"] > 0:
+            frt_gap = eng["FRT"] - non_eng["FRT"]
+            recs.append(
+                (
+                    "2. AI real-time translation for non-English cases",
+                    f"Non-English tickets (**{non_eng['Ticket Count']:,}** of {int(overall['Ticket Count']):,}, "
+                    f"{non_eng['Ticket Count']/overall['Ticket Count']*100:.1f}%) run FRT SLA of "
+                    f"**{non_eng['FRT']:.1f}%** vs. **{eng['FRT']:.1f}%** for English "
+                    f"({frt_gap:+.1f} point gap). Real-time translation could help close this gap toward the "
+                    f"90% FRT SLA target.",
+                )
+            )
+
+    # 3. AI emailBOT for email composition
+    if pd.notna(email_kpis["EmailFRT"]) and email_kpis["Ticket Count"] > 0:
+        recs.append(
+            (
+                "3. AI emailBOT for reply drafting",
+                f"Email channel First Reply Time SLA is **{email_kpis['EmailFRT']:.1f}%** across "
+                f"**{email_kpis['Ticket Count']:,}** email tickets "
+                f"({gap_to_target(email_kpis['EmailFRT'],'EmailFRT'):+.1f} points vs. the 90% target). "
+                f"An AI-drafted reply for agent review/edit/send could reduce drafting time and help close this gap.",
+            )
+        )
+
+    # 4. Lead notification before FRT breach
+    if pd.notna(overall["FRT"]):
+        gap = gap_to_target(overall["FRT"], "FRT")
+        recs.append(
+            (
+                "4. Proactive lead alert near FRT threshold",
+                f"Current FRT SLA is **{overall['FRT']:.1f}%** ({gap:+.1f} points vs. the 90% target). "
+                f"Alerting leads when a case is approaching its FRT threshold — before it breaches — is a "
+                f"common early-warning pattern that could reduce the number of missed replies contributing to this gap.",
+            )
+        )
+
+    # 5. Knowledge base with SME/trainer support
+    if pd.notna(overall["Reopen"]):
+        recs.append(
+            (
+                "5. SME/trainer-built knowledge base",
+                f"Reopen rate is currently **{overall['Reopen']:.1f}%** (target <10%). A structured knowledge base, "
+                f"built and maintained with SME/trainer input, would give agents standardized resolution guidance — "
+                f"typically improving first-time-fix rates and helping bring reopen rate down over time.",
+            )
+        )
+
+    # 6. Similar/closed-ticket retrieval
+    if pd.notna(overall["24HrRT"]):
+        recs.append(
+            (
+                "6. Real-time retrieval of similar closed tickets",
+                f"24-Hr Resolution SLA is **{overall['24HrRT']:.1f}%** "
+                f"({gap_to_target(overall['24HrRT'],'24HrRT'):+.1f} points vs. target). Surfacing similar, "
+                f"already-resolved tickets to agents at case-open time would let them reuse proven resolutions, "
+                f"which typically shortens resolution time and supports this SLA.",
+            )
+        )
+
+    # 7. Skill-based agent routing (language/channel/product)
+    if not ch_kpis.empty and len(ch_kpis) > 1 and ch_kpis["CSAT"].notna().sum() > 1:
+        csat_spread = ch_kpis["CSAT"].max() - ch_kpis["CSAT"].min()
+        recs.append(
+            (
+                "7. Skill-based agent routing",
+                f"CSAT varies by **{csat_spread:.1f} points** across channels in the current selection. "
+                f"Routing tickets to agents matched on language, channel and product proficiency is a standard "
+                f"lever to narrow this spread and lift CSAT toward the 90% target.",
+            )
+        )
+
+    # 8. Shift-left for high-frequency issues per product
+    if not prod_share.empty:
+        top_prod = prod_share.iloc[0]
+        if top_prod["Share %"] >= 30:
+            recs.append(
+                (
+                    "8. Shift-left for high-frequency issues",
+                    f"**{top_prod['Product']}** accounts for **{top_prod['Share %']:.1f}%** "
+                    f"({top_prod['Ticket Count']:,} tickets) of current volume. Identifying its highest-frequency "
+                    f"issue types and shifting them left (self-service, guided flows, or automation) could reduce "
+                    f"incoming volume and free up capacity to raise FRT/24Hr RT SLA elsewhere.",
+                )
+            )
+
+    # 9. Best-practice sharing / mentoring from high performers
+    if not ch_kpis.empty and len(ch_kpis) > 1 and ch_kpis["FRT"].notna().sum() > 1:
+        best = ch_kpis.loc[ch_kpis["FRT"].idxmax()]
+        recs.append(
+            (
+                "9. Best-practice sharing & mentoring",
+                f"**{best[LABELS['channel']]}** currently leads on FRT SLA at **{best['FRT']:.1f}%**. "
+                f"Documenting the practices behind that performance and pairing lower performers with mentors "
+                f"is a standard way to lift the group average toward that benchmark.",
+            )
+        )
+
+    # 10. Process workflow study for automation
+    if pd.notna(overall["24HrRT"]):
+        recs.append(
+            (
+                "10. Workflow study for end-to-end automation",
+                f"With 24-Hr Resolution SLA at **{overall['24HrRT']:.1f}%**, mapping the end-to-end ticket workflow "
+                f"to find manual, automatable steps is a standard throughput lever — even a modest reduction in "
+                f"handling steps typically compounds into measurable SLA gains at this ticket volume "
+                f"({int(overall['Ticket Count']):,} tickets).",
+            )
+        )
+
+    # 11. Temporary fixes for high-priority tickets
+    if hp_kpis is not None and pd.notna(hp_kpis["24HrRT"]):
+        recs.append(
+            (
+                "11. Temporary fixes for high-priority tickets",
+                f"High/Urgent priority tickets ({hp_kpis['Ticket Count']:,} tickets) show 24-Hr Resolution SLA of "
+                f"**{hp_kpis['24HrRT']:.1f}%**. Offering a temporary fix where applicable — de-escalating priority "
+                f"while the permanent fix is worked — could help this cohort's SLA move toward the 90% target faster.",
+            )
+        )
+    elif RAW_COLS["priority"] not in df.columns:
+        recs.append(
+            (
+                "11. Temporary fixes for high-priority tickets",
+                f"The uploaded file doesn't include a `priority` column, so this can't be quantified against the "
+                f"current {int(overall['Ticket Count']):,}-ticket base — once available, tracking High/Urgent SLA "
+                f"specifically (against the 90% target) would show where temporary fixes help most.",
+            )
+        )
+
+    # Additional industry-standard best practices
+    if pd.notna(overall["CSAT"]):
+        recs.append(
+            (
+                "12. Tiered (L1/L2/L3) support model",
+                f"With CSAT at **{overall['CSAT']:.1f}%**, escalation tiering — routine issues resolved at L1, "
+                f"complex cases reserved for specialists — is an industry-standard structure that typically "
+                f"improves both FRT (faster routine handling) and CSAT (better-matched specialist attention).",
+            )
+        )
+    if pd.notna(overall["Reopen"]):
+        recs.append(
+            (
+                "13. Root-cause analysis on reopened tickets",
+                f"Reopen rate is **{overall['Reopen']:.1f}%**. A lightweight RCA step on every reopened ticket "
+                f"(standard in mature support orgs) helps identify systemic fix gaps and is typically one of the "
+                f"fastest levers to bring reopen rate down toward the <10% target.",
+            )
+        )
+    recs.append(
+        (
+            "14. QA scorecards & calibration sessions",
+            f"Regular quality scorecards and calibration sessions across agents/teams (current base: "
+            f"{int(overall['Ticket Count']):,} tickets in scope) are an industry-standard mechanism to keep "
+            f"CSAT and SLA performance consistent as volume grows.",
+        )
+    )
+
+    return recs
+
+
+# --------------------------------------------------------------------------
 # Sidebar — upload + filters
 # --------------------------------------------------------------------------
 st.sidebar.title("📂 Data Source")
 uploaded_file = st.sidebar.file_uploader("Upload ticket export (.xlsx or .csv)", type=["xlsx", "xls", "csv"])
 
-st.title("Cyncly Support Ticket Analytics")
+st.title("Cyncly Support Analytics")
 
 if uploaded_file is None:
     st.info("Upload a data file from the left panel to get started.")
@@ -407,5 +800,47 @@ email_table = build_email_summary(df)
 if email_table.empty:
     st.info("No 'email' channel records found in the current filter selection.")
 else:
-    pct_cols = ["Email FRT SLA %", "24Hr RT (RWT) SLA %"]
+    pct_cols = ["Email FRT SLA %", "Email RWT SLA %"]
     st.dataframe(style_pct_cols(email_table, pct_cols), use_container_width=True, height=500)
+
+# --------------------------------------------------------------------------
+# 4. KPI observations (every bullet includes at least one number)
+# --------------------------------------------------------------------------
+st.header("🔍 KPI Observations")
+
+kpi_observations = generate_kpi_observations(df, overall_table, email_table)
+if kpi_observations:
+    st.markdown("\n".join(f"- {o}" for o in kpi_observations))
+else:
+    st.info("Not enough data in the current selection to generate KPI observations.")
+
+# --------------------------------------------------------------------------
+# 5. Recommendations, linked to the current filtered condition
+# --------------------------------------------------------------------------
+st.header("💡 Recommendations")
+
+active_filters = []
+if sel_product:
+    active_filters.append(f"Product: {', '.join(sel_product)}")
+if sel_channel:
+    active_filters.append(f"Channel: {', '.join(sel_channel)}")
+if sel_country:
+    active_filters.append(f"Country: {', '.join(sel_country)}")
+if sel_language:
+    active_filters.append(f"Language: {', '.join(sel_language)}")
+if sel_category:
+    active_filters.append(f"Customer Category: {', '.join(sel_category)}")
+
+if active_filters:
+    st.caption("Based on the current filters — " + " | ".join(active_filters) + f" — {len(df):,} tickets in scope.")
+else:
+    st.caption(f"Based on the full dataset (no filters applied) — {len(df):,} tickets in scope.")
+
+recommendations = generate_recommendations(df, overall_table, email_table)
+if recommendations:
+    for title, body in recommendations:
+        with st.expander(title):
+            st.markdown(body)
+else:
+    st.info("Not enough data in the current selection to generate recommendations.")
+
