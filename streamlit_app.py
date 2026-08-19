@@ -49,6 +49,7 @@ LABELS = {
     "country": "Country",
     "language": "Language",
     "category": "Customer Category",
+    "priority": "Priority",
 }
 
 TREND_UP, TREND_DOWN, TREND_FLAT = "\u2191", "\u2193", "\u2192"
@@ -88,6 +89,7 @@ def load_data(uploaded_file) -> pd.DataFrame:
         RAW_COLS["country"]: LABELS["country"],
         RAW_COLS["language"]: LABELS["language"],
         RAW_COLS["category"]: LABELS["category"],
+        RAW_COLS["priority"]: LABELS["priority"],
     }
     rename_map = {k: v for k, v in rename_map.items() if k in df.columns}
     df = df.rename(columns=rename_map)
@@ -254,7 +256,7 @@ def build_email_summary(df: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
     if email_df.empty:
         return pd.DataFrame()
 
-    group_cols = [LABELS["product"], LABELS["category"], LABELS["country"], LABELS["language"]]
+    group_cols = [LABELS["product"], LABELS["category"], LABELS["country"], LABELS["language"], LABELS["priority"]]
     group_cols = [c for c in group_cols if c in email_df.columns]
     if not group_cols:
         return pd.DataFrame()
@@ -386,9 +388,9 @@ def product_ticket_share(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def high_priority_kpis(df: pd.DataFrame):
-    if RAW_COLS["priority"] not in df.columns:
+    if LABELS["priority"] not in df.columns:
         return None
-    high_df = df[df[RAW_COLS["priority"]].astype(str).str.lower().isin(["high", "urgent"])]
+    high_df = df[df[LABELS["priority"]].astype(str).str.lower().isin(["high", "urgent"])]
     if high_df.empty:
         return None
     k = compute_kpis(high_df)
@@ -673,7 +675,7 @@ def generate_recommendations(df: pd.DataFrame, overall_table: pd.DataFrame, emai
                 f"while the permanent fix is worked — could help this cohort's SLA move toward the 90% target faster.",
             )
         )
-    elif RAW_COLS["priority"] not in df.columns:
+    elif LABELS["priority"] not in df.columns:
         recs.append(
             (
                 "11. Temporary fixes for high-priority tickets",
@@ -865,7 +867,7 @@ else:
 # --------------------------------------------------------------------------
 st.header("📧 Email Channel SLA Summary")
 st.caption(
-    "Restricted to via.channel = 'email'. Grouped by Product, Customer Category, Country and Language — "
+    "Restricted to via.channel = 'email'. Grouped by Product, Customer Category, Country, Language and Priority — "
     "top 50 combinations by ticket count."
 )
 
