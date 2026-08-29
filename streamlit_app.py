@@ -41,6 +41,7 @@ RAW_COLS = {
     "priority": "priority",
     "reply_time_mins": "metric_set.reply_time_in_minutes.business",
     "requester_wait_mins": "metric_set.requester_wait_time_in_minutes.business",
+    "first_resolution_mins": "metric_set.first_resolution_time_in_minutes.business",
 }
 
 LABELS = {
@@ -66,7 +67,7 @@ KPI_TARGETS = {
     "CSAT": {"label": "CSAT %", "target": 90.0, "higher_is_better": True},
     "Reopen": {"label": "Reopen %", "target": 10.0, "higher_is_better": False},
     "EmailFRT": {"label": "Email First Reply Time SLA %", "target": 90.0, "higher_is_better": True},
-    "RWT": {"label": "Requester Wait Time (24Hr) SLA % [Email]", "target": 90.0, "higher_is_better": True},
+    "RWT": {"label": "Requester Wait Time SLA % [Email]", "target": 90.0, "higher_is_better": True},
 }
 
 
@@ -146,6 +147,21 @@ def median_minutes(series: pd.Series) -> float:
     return valid.median()
 
 
+def mean_minutes(series: pd.Series) -> float:
+    """
+    Mean (average) elapsed business time in minutes for a raw time metric
+    column. Shown alongside the median — the average is more sensitive to a
+    handful of very long-running tickets, so the two together give a fuller
+    picture than either alone.
+    """
+    if series is None:
+        return np.nan
+    valid = pd.to_numeric(series, errors="coerce").dropna()
+    if len(valid) == 0:
+        return np.nan
+    return valid.mean()
+
+
 def fmt_minutes(value: float) -> str:
     """Format a minute value as minutes, or as hours+minutes once it's large."""
     if pd.isna(value):
@@ -216,11 +232,24 @@ def build_overall_summary(df: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
         row["FRT Median (mins)"] = (
             median_minutes(g[RAW_COLS["reply_time_mins"]]) if RAW_COLS["reply_time_mins"] in g.columns else np.nan
         )
+        row["FRT Average (mins)"] = (
+            mean_minutes(g[RAW_COLS["reply_time_mins"]]) if RAW_COLS["reply_time_mins"] in g.columns else np.nan
+        )
         row["FRT Trend"] = (
             trend_arrow(g_sorted, RAW_COLS["frt"], pct_compliant) if RAW_COLS["frt"] in g.columns else TREND_FLAT
         )
 
         row["24Hr RT SLA %"] = rt24_val
+        row["First Resolution Time Median (mins)"] = (
+            median_minutes(g[RAW_COLS["first_resolution_mins"]])
+            if RAW_COLS["first_resolution_mins"] in g.columns
+            else np.nan
+        )
+        row["First Resolution Time Average (mins)"] = (
+            mean_minutes(g[RAW_COLS["first_resolution_mins"]])
+            if RAW_COLS["first_resolution_mins"] in g.columns
+            else np.nan
+        )
         row["24Hr RT Trend"] = (
             trend_arrow(g_sorted, RAW_COLS["rt24"], pct_compliant) if RAW_COLS["rt24"] in g.columns else TREND_FLAT
         )
@@ -278,19 +307,27 @@ def build_email_summary(df: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
         row["Email FRT Median (mins)"] = (
             median_minutes(g[RAW_COLS["reply_time_mins"]]) if RAW_COLS["reply_time_mins"] in g.columns else np.nan
         )
+        row["Email FRT Average (mins)"] = (
+            mean_minutes(g[RAW_COLS["reply_time_mins"]]) if RAW_COLS["reply_time_mins"] in g.columns else np.nan
+        )
         row["Email FRT Trend"] = (
             trend_arrow(g_sorted, RAW_COLS["email_frt"], pct_compliant)
             if RAW_COLS["email_frt"] in g.columns
             else TREND_FLAT
         )
 
-        row["RWT SLA %"] = rwt_val
-        row["RWT Median (mins)"] = (
+        row["24Hr RT SLA %"] = rwt_val
+        row["24Hr RT Median (mins)"] = (
             median_minutes(g[RAW_COLS["requester_wait_mins"]])
             if RAW_COLS["requester_wait_mins"] in g.columns
             else np.nan
         )
-        row["RWT Trend"] = (
+        row["24Hr RT Average (mins)"] = (
+            mean_minutes(g[RAW_COLS["requester_wait_mins"]])
+            if RAW_COLS["requester_wait_mins"] in g.columns
+            else np.nan
+        )
+        row["24Hr RT Trend"] = (
             trend_arrow(g_sorted, RAW_COLS["rwt"], pct_compliant) if RAW_COLS["rwt"] in g.columns else TREND_FLAT
         )
 
@@ -318,21 +355,30 @@ def style_table(df: pd.DataFrame, pct_cols=None, min_cols=None) -> "pd.io.format
 # KPI computation helpers (shared by the Observations & Recommendations engine)
 # --------------------------------------------------------------------------
 def compute_kpis(sub_df: pd.DataFrame) -> dict:
-    """Core KPI set applicable to all channels: FRT, 24Hr RT, CSAT, Reopen %."""
+    """Core KPI set applicable to all channels: FRT, 24Hr RT (incl. First Resolution Time), CSAT, Reopen %."""
     return {
         "Ticket Count": len(sub_df),
         "FRT": pct_compliant(sub_df[RAW_COLS["frt"]]) if RAW_COLS["frt"] in sub_df.columns else np.nan,
         "FRT_mins": median_minutes(sub_df[RAW_COLS["reply_time_mins"]])
         if RAW_COLS["reply_time_mins"] in sub_df.columns
         else np.nan,
+        "FRT_mins_avg": mean_minutes(sub_df[RAW_COLS["reply_time_mins"]])
+        if RAW_COLS["reply_time_mins"] in sub_df.columns
+        else np.nan,
         "24HrRT": pct_compliant(sub_df[RAW_COLS["rt24"]]) if RAW_COLS["rt24"] in sub_df.columns else np.nan,
+        "FirstRes_mins": median_minutes(sub_df[RAW_COLS["first_resolution_mins"]])
+        if RAW_COLS["first_resolution_mins"] in sub_df.columns
+        else np.nan,
+        "FirstRes_mins_avg": mean_minutes(sub_df[RAW_COLS["first_resolution_mins"]])
+        if RAW_COLS["first_resolution_mins"] in sub_df.columns
+        else np.nan,
         "CSAT": pct_csat(sub_df[RAW_COLS["csat"]]) if RAW_COLS["csat"] in sub_df.columns else np.nan,
         "Reopen": pct_reopen(sub_df[RAW_COLS["reopens"]]) if RAW_COLS["reopens"] in sub_df.columns else np.nan,
     }
 
 
 def compute_email_kpis(df: pd.DataFrame) -> dict:
-    """Email-only KPI set: adds Email FRT and Requester Wait Time (RWT), each with a median-minutes figure."""
+    """Email-only KPI set: adds Email FRT and Requester Wait Time (RWT), each with median & average minutes."""
     if LABELS["channel"] not in df.columns:
         email_df = df.iloc[0:0]
     else:
@@ -343,8 +389,14 @@ def compute_email_kpis(df: pd.DataFrame) -> dict:
         "EmailFRT_mins": median_minutes(email_df[RAW_COLS["reply_time_mins"]])
         if RAW_COLS["reply_time_mins"] in email_df.columns
         else np.nan,
+        "EmailFRT_mins_avg": mean_minutes(email_df[RAW_COLS["reply_time_mins"]])
+        if RAW_COLS["reply_time_mins"] in email_df.columns
+        else np.nan,
         "RWT": pct_compliant(email_df[RAW_COLS["rwt"]]) if RAW_COLS["rwt"] in email_df.columns else np.nan,
         "RWT_mins": median_minutes(email_df[RAW_COLS["requester_wait_mins"]])
+        if RAW_COLS["requester_wait_mins"] in email_df.columns
+        else np.nan,
+        "RWT_mins_avg": mean_minutes(email_df[RAW_COLS["requester_wait_mins"]])
         if RAW_COLS["requester_wait_mins"] in email_df.columns
         else np.nan,
     }
@@ -419,7 +471,11 @@ def generate_kpi_observations(df: pd.DataFrame, overall_table: pd.DataFrame, ema
     n = overall["Ticket Count"]
 
     if pd.notna(overall["FRT"]):
-        mins_str = f", median reply time **{fmt_minutes(overall['FRT_mins'])}**" if pd.notna(overall["FRT_mins"]) else ""
+        mins_str = (
+            f", median reply time **{fmt_minutes(overall['FRT_mins'])}** (average **{fmt_minutes(overall['FRT_mins_avg'])}**)"
+            if pd.notna(overall["FRT_mins"])
+            else ""
+        )
         obs.append(
             f"**First Reply Time (FRT) SLA** is at **{overall['FRT']:.1f}%** across {n:,} tickets"
             f"{mins_str} "
@@ -429,6 +485,12 @@ def generate_kpi_observations(df: pd.DataFrame, overall_table: pd.DataFrame, ema
         obs.append(
             f"**24-Hr Resolution Time SLA** is at **{overall['24HrRT']:.1f}%** "
             f"({gap_to_target(overall['24HrRT'],'24HrRT'):+.1f} points vs. the 90% target)."
+        )
+    if pd.notna(overall["FirstRes_mins"]):
+        obs.append(
+            f"**First Resolution Time** has a median of **{fmt_minutes(overall['FirstRes_mins'])}** "
+            f"and an average of **{fmt_minutes(overall['FirstRes_mins_avg'])}** across {n:,} tickets — "
+            f"the gap between the two points to a long tail of slow-resolving tickets pulling the average up."
         )
     if pd.notna(overall["CSAT"]):
         obs.append(
@@ -480,16 +542,23 @@ def generate_kpi_observations(df: pd.DataFrame, overall_table: pd.DataFrame, ema
         em = compute_email_kpis(df)
         if pd.notna(em["EmailFRT"]):
             mins_str = (
-                f", median reply time **{fmt_minutes(em['EmailFRT_mins'])}**" if pd.notna(em["EmailFRT_mins"]) else ""
+                f", median reply time **{fmt_minutes(em['EmailFRT_mins'])}** "
+                f"(average **{fmt_minutes(em['EmailFRT_mins_avg'])}**)"
+                if pd.notna(em["EmailFRT_mins"])
+                else ""
             )
             obs.append(
                 f"Email channel First Reply Time SLA is **{em['EmailFRT']:.1f}%** across "
                 f"**{em['Ticket Count']:,}** email tickets{mins_str}."
             )
         if pd.notna(em["RWT"]):
-            mins_str = f", median wait time **{fmt_minutes(em['RWT_mins'])}**" if pd.notna(em["RWT_mins"]) else ""
+            mins_str = (
+                f", median wait time **{fmt_minutes(em['RWT_mins'])}** (average **{fmt_minutes(em['RWT_mins_avg'])}**)"
+                if pd.notna(em["RWT_mins"])
+                else ""
+            )
             obs.append(
-                f"Email channel Requester Wait Time (24Hr) SLA is **{em['RWT']:.1f}%**{mins_str} "
+                f"Email channel Requester Wait Time SLA is **{em['RWT']:.1f}%**{mins_str} "
                 f"({gap_to_target(em['RWT'],'RWT'):+.1f} points vs. the 90% target)."
             )
 
@@ -565,7 +634,8 @@ def generate_recommendations(df: pd.DataFrame, overall_table: pd.DataFrame, emai
     # 3. AI emailBOT for email composition
     if pd.notna(email_kpis["EmailFRT"]) and email_kpis["Ticket Count"] > 0:
         mins_str = (
-            f", median reply time **{fmt_minutes(email_kpis['EmailFRT_mins'])}**"
+            f", median reply time **{fmt_minutes(email_kpis['EmailFRT_mins'])}** "
+            f"(average **{fmt_minutes(email_kpis['EmailFRT_mins_avg'])}**)"
             if pd.notna(email_kpis["EmailFRT_mins"])
             else ""
         )
@@ -582,7 +652,11 @@ def generate_recommendations(df: pd.DataFrame, overall_table: pd.DataFrame, emai
     # 4. Lead notification before FRT breach
     if pd.notna(overall["FRT"]):
         gap = gap_to_target(overall["FRT"], "FRT")
-        mins_str = f", median reply time **{fmt_minutes(overall['FRT_mins'])}**" if pd.notna(overall["FRT_mins"]) else ""
+        mins_str = (
+            f", median reply time **{fmt_minutes(overall['FRT_mins'])}** (average **{fmt_minutes(overall['FRT_mins_avg'])}**)"
+            if pd.notna(overall["FRT_mins"])
+            else ""
+        )
         recs.append(
             (
                 "4. Proactive lead alert near FRT threshold",
@@ -605,11 +679,17 @@ def generate_recommendations(df: pd.DataFrame, overall_table: pd.DataFrame, emai
 
     # 6. Similar/closed-ticket retrieval
     if pd.notna(overall["24HrRT"]):
+        mins_str = (
+            f" First Resolution Time currently runs a median of **{fmt_minutes(overall['FirstRes_mins'])}** "
+            f"(average **{fmt_minutes(overall['FirstRes_mins_avg'])}**)."
+            if pd.notna(overall["FirstRes_mins"])
+            else ""
+        )
         recs.append(
             (
                 "6. Real-time retrieval of similar closed tickets",
                 f"24-Hr Resolution SLA is **{overall['24HrRT']:.1f}%** "
-                f"({gap_to_target(overall['24HrRT'],'24HrRT'):+.1f} points vs. target). Surfacing similar, "
+                f"({gap_to_target(overall['24HrRT'],'24HrRT'):+.1f} points vs. target).{mins_str} Surfacing similar, "
                 f"already-resolved tickets to agents at case-open time would let them reuse proven resolutions, "
                 f"which typically shortens resolution time and supports this SLA.",
             )
@@ -859,7 +939,12 @@ if overall_table.empty:
     st.warning("Not enough data / required columns to build this table.")
 else:
     pct_cols = ["FRT SLA %", "24Hr RT SLA %", "CSAT %", "Reopen Rate %"]
-    min_cols = ["FRT Median (mins)"]
+    min_cols = [
+        "FRT Median (mins)",
+        "FRT Average (mins)",
+        "First Resolution Time Median (mins)",
+        "First Resolution Time Average (mins)",
+    ]
     st.dataframe(style_table(overall_table, pct_cols, min_cols), use_container_width=True, height=500)
 
 # --------------------------------------------------------------------------
@@ -875,8 +960,13 @@ email_table = build_email_summary(df)
 if email_table.empty:
     st.info("No 'email' channel records found in the current filter selection.")
 else:
-    pct_cols = ["Email FRT SLA %", "RWT SLA %"]
-    min_cols = ["Email FRT Median (mins)", "RWT Median (mins)"]
+    pct_cols = ["Email FRT SLA %", "24Hr RT SLA %"]
+    min_cols = [
+        "Email FRT Median (mins)",
+        "Email FRT Average (mins)",
+        "24Hr RT Median (mins)",
+        "24Hr RT Average (mins)",
+    ]
     st.dataframe(style_table(email_table, pct_cols, min_cols), use_container_width=True, height=500)
 
 # --------------------------------------------------------------------------
