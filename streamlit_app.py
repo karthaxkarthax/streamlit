@@ -18,7 +18,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-st.set_page_config(page_title="Innoplus Ticket Analytics", layout="wide")
+st.set_page_config(page_title="Cyncly Support Analytics", layout="wide")
 
 # --------------------------------------------------------------------------
 # Column name map (source column -> internal / display label)
