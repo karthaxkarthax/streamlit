@@ -216,6 +216,7 @@ def build_overall_summary(df: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
     for c in group_cols:
         work[c] = work[c].fillna("Unknown")
 
+
     rows = []
     for keys, g in work.groupby(group_cols, dropna=False):
         keys = keys if isinstance(keys, tuple) else (keys,)
