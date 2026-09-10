@@ -13,7 +13,6 @@ Channel, Country, Language and Customer Category, and review:
 Run with:  streamlit run streamlit_app.py
 """
 
-
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -28,7 +27,7 @@ RAW_COLS = {
     "product": "group.name",
     "channel": "via.channel",
     "country": "new country",
-    "language": "new language",
+    "language": "New Language",
     "category": "new customer category",
     "hour": "new Hour",
     "month": "new Month",
@@ -49,7 +48,7 @@ LABELS = {
     "product": "Product",
     "channel": "Channel",
     "country": "Country",
-    "language": "Language",
+    "language": "New Language",
     "category": "Customer Category",
     "priority": "Priority",
 }
@@ -275,7 +274,8 @@ def build_overall_summary(df: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
     result = pd.DataFrame(rows)
     if result.empty:
         return result
-    result = result.sort_values("Ticket Count", ascending=False).head(top_n).reset_index(drop=True)
+    #result = result.sort_values("Ticket Count", ascending=False).head(top_n).reset_index(drop=True)
+    result = result.sort_values("Ticket Count", ascending=False).reset_index(drop=True)
     return result
 
 
