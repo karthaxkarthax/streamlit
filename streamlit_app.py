@@ -44,6 +44,7 @@ RAW_COLS = {
     "first_resolution_mins": "metric_set.first_resolution_time_in_minutes.business",
 }
 
+
 LABELS = {
     "product": "Product",
     "channel": "Channel",
